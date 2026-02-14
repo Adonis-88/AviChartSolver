@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useMemo, useState } from "react";
 
 /** =========================
  *  Types
@@ -22,9 +22,6 @@ type Inputs = {
   landingWeightKg: number; // climb-limit check only
 };
 
-type DigMode = "PH" | "SLOPE" | "WIND";
-type DigStore = Record<number, Pt[]>;
-
 /** =========================
  *  Small utilities
  *  ========================= */
@@ -45,37 +42,6 @@ function buildPathD(points: Pt[]) {
     .map((p, i) => `${i === 0 ? "M" : "L"} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`)
     .join(" ");
 }
-function inRect(p: Pt, r: Rect) {
-  return p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
-}
-
-const DIG_STORAGE_KEY = "avichartsolver_fig4_digitiser_v1";
-
-function normalizePointArray(maybePts: unknown): Pt[] {
-  if (!Array.isArray(maybePts)) return [];
-  const out: Pt[] = [];
-  for (const p of maybePts) {
-    if (!p || typeof p !== "object") continue;
-    const x = Number((p as { x?: number }).x);
-    const y = Number((p as { y?: number }).y);
-    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-    out.push({ x, y });
-  }
-  return out;
-}
-
-function normalizeDigStore(maybeStore: unknown): DigStore {
-  if (!maybeStore || typeof maybeStore !== "object") return {};
-  const out: DigStore = {};
-  for (const [key, value] of Object.entries(maybeStore as Record<string, unknown>)) {
-    const id = Number(key);
-    if (!Number.isFinite(id)) continue;
-    const pts = normalizePointArray(value);
-    if (pts.length) out[id] = pts;
-  }
-  return out;
-}
-
 /** =========================
  *  Robust intersection (vertical X)
  *  ========================= */
@@ -583,9 +549,7 @@ const FIG4 = {
 } as const;
 
 /** =========================
- *  Digitised data (fallback)
- *  - PH has real fallback.
- *  - SLOPE/WIND fallback is intentionally minimal; you’ll digitise your 14/12 curve sets.
+ *  Digitised curve data
  *  ========================= */
 const PH_LINES: LineFamily[] = [
   {
@@ -874,46 +838,11 @@ function xToWindKt(x: number) {
   return mapLin(x, refX, g.x + g.w, 0, r.hi);
 }
 
-/** =========================
- *  Store -> active families
- *  ========================= */
-function storeToFamilies(store: DigStore, fallback: LineFamily[]) {
-  const fromStore: LineFamily[] = Object.entries(store)
-    .map(([k, pts]) => ({ value: Number(k), pts }))
-    .filter((l) => l.pts.length >= 2)
-    .sort((a, b) => a.value - b.value);
-
-  return fromStore.length ? fromStore : fallback;
-}
-
 function splitFamiliesBySign(family: LineFamily[]) {
   return {
     neg: family.filter((l) => l.value < 0),
     pos: family.filter((l) => l.value > 0),
   };
-}
-
-/** =========================
- *  Digitiser ID sets (your request)
- *  ========================= */
-const DIG_IDS = {
-  PH: [0, 2000, 4000, 6000],
-  SLOPE: [-7, -6, -5, -4, -3, -2, -1, 1, 2, 3, 4, 5, 6, 7],
-  WIND: [-6, -5, -4, -3, -2, -1, 1, 2, 3, 4, 5, 6],
-} as const;
-
-function isSideOkForClick(mode: DigMode, id: number, p: Pt) {
-  if (mode === "SLOPE") {
-    const refX = FIG4.refs.slopeRefX;
-    if (id < 0) return p.x <= refX + 1.0; // DOWN ids: left side
-    if (id > 0) return p.x >= refX - 1.0; // UP ids: right side
-  }
-  if (mode === "WIND") {
-    const refX = FIG4.refs.windRefX;
-    if (id < 0) return p.x <= refX + 1.0; // TAIL ids: left side
-    if (id > 0) return p.x >= refX - 1.0; // HEAD ids: right side
-  }
-  return true;
 }
 
 /** =========================
@@ -938,161 +867,14 @@ export default function Figure4Page() {
     } satisfies Inputs;
   }, [inputs]);
 
-  const svgRef = useRef<SVGSVGElement | null>(null);
-
   const { w: VIEWBOX_W, h: VIEWBOX_H } = FIG4.viewBox;
   const { panels, refs } = FIG4;
 
   const REFERENCE_IMAGE_SRC = "/charts/workbook_v3_0a/figure_4.png";
   const SHOW_REFERENCE_IMAGE = true;
-
-  /** ===== Multi-mode digitiser ===== */
-  const [digEnabled, setDigEnabled] = useState(false);
-  const [digMode, setDigMode] = useState<DigMode>("PH");
-  const [digValue, setDigValue] = useState<number>(4000);
-
-  const [digPhStore, setDigPhStore] = useState<DigStore>({});
-  const [digSlopeStore, setDigSlopeStore] = useState<DigStore>({});
-  const [digWindStore, setDigWindStore] = useState<DigStore>({});
-
-  useEffect(() => {
-    try {
-      const raw = window.localStorage.getItem(DIG_STORAGE_KEY);
-      if (!raw) return;
-      const parsed = JSON.parse(raw) as { ph?: unknown; slope?: unknown; wind?: unknown };
-      setDigPhStore(normalizeDigStore(parsed?.ph));
-      setDigSlopeStore(normalizeDigStore(parsed?.slope));
-      setDigWindStore(normalizeDigStore(parsed?.wind));
-    } catch {
-      // ignore invalid storage
-    }
-  }, []);
-
-  useEffect(() => {
-    try {
-      const payload = { ph: digPhStore, slope: digSlopeStore, wind: digWindStore };
-      window.localStorage.setItem(DIG_STORAGE_KEY, JSON.stringify(payload));
-    } catch {
-      // ignore storage errors
-    }
-  }, [digPhStore, digSlopeStore, digWindStore]);
-
-  const activePhLines = useMemo(
-    () => storeToFamilies(digPhStore, PH_LINES),
-    [digPhStore]
-  );
-  const activeSlopeCurves = useMemo(
-    () => storeToFamilies(digSlopeStore, SLOPE_CURVES),
-    [digSlopeStore]
-  );
-  const activeWindCurves = useMemo(
-    () => storeToFamilies(digWindStore, WIND_CURVES),
-    [digWindStore]
-  );
-
-  const activeDigitiser = useMemo(() => {
-    if (digMode === "PH") {
-      return {
-        store: digPhStore,
-        setStore: setDigPhStore,
-        panel: panels.phTempNomogram,
-        exportName: "PH_LINES",
-      } as const;
-    }
-    if (digMode === "SLOPE") {
-      return {
-        store: digSlopeStore,
-        setStore: setDigSlopeStore,
-        panel: panels.slopeGrid,
-        exportName: "SLOPE_CURVES",
-      } as const;
-    }
-    return {
-      store: digWindStore,
-      setStore: setDigWindStore,
-      panel: panels.windGrid,
-      exportName: "WIND_CURVES",
-    } as const;
-  }, [digMode, digPhStore, digSlopeStore, digWindStore, panels]);
-
-  const digPointsCount = useMemo(
-    () => activeDigitiser.store[digValue]?.length ?? 0,
-    [activeDigitiser.store, digValue]
-  );
-
-  const exportSnippet = useMemo(() => {
-    const lines: LineFamily[] = Object.entries(activeDigitiser.store)
-      .map(([k, pts]) => ({ value: Number(k), pts }))
-      .filter((l) => l.pts.length >= 2)
-      .sort((a, b) => a.value - b.value);
-
-    return `const ${activeDigitiser.exportName}: LineFamily[] = ${JSON.stringify(lines, null, 2)};\n`;
-  }, [activeDigitiser.store, activeDigitiser.exportName]);
-
-  const canCopySnippet = Object.keys(activeDigitiser.store).length > 0;
-
-  const exportAllSnippet = useMemo(() => {
-    const build = (name: string, store: DigStore) => {
-      const lines: LineFamily[] = Object.entries(store)
-        .map(([k, pts]) => ({ value: Number(k), pts }))
-        .filter((l) => l.pts.length >= 2)
-        .sort((a, b) => a.value - b.value);
-      return `const ${name}: LineFamily[] = ${JSON.stringify(lines, null, 2)};`;
-    };
-    return `${build("PH_LINES", digPhStore)}\n\n${build("SLOPE_CURVES", digSlopeStore)}\n\n${build(
-      "WIND_CURVES",
-      digWindStore
-    )}\n`;
-  }, [digPhStore, digSlopeStore, digWindStore]);
-
-  const hasAnyDigData =
-    Object.keys(digPhStore).length > 0 ||
-    Object.keys(digSlopeStore).length > 0 ||
-    Object.keys(digWindStore).length > 0;
-
-  const digDisplayPoints = useMemo(() => {
-    const entries = Object.entries(activeDigitiser.store) as Array<[string, Pt[]]>;
-    const points: Array<{ id: number; pt: Pt }> = [];
-    for (const [idStr, pts] of entries) {
-      const id = Number(idStr);
-      if (!Number.isFinite(id)) continue;
-      for (const pt of pts) points.push({ id, pt });
-    }
-    return points;
-  }, [activeDigitiser.store]);
-
-  const digPointColor = useCallback(
-    (id: number) => {
-      if (digMode === "PH") return "#0f172a"; // slate-900
-      if (digMode === "SLOPE") return id < 0 ? "#2563eb" : "#dc2626"; // blue for DOWN, red for UP
-      return id < 0 ? "#2563eb" : "#dc2626"; // wind: blue tail, red head
-    },
-    [digMode]
-  );
-
-  const onSvgClick = useCallback(
-    (e: React.MouseEvent) => {
-      if (!digEnabled) return;
-
-      const svg = svgRef.current;
-      if (!svg) return;
-
-      const ctm = svg.getScreenCTM();
-      if (!ctm) return;
-
-      const p = new DOMPoint(e.clientX, e.clientY).matrixTransform(ctm.inverse());
-      const clickPt: Pt = { x: p.x, y: p.y };
-
-      if (!inRect(clickPt, activeDigitiser.panel)) return;
-      if (!isSideOkForClick(digMode, digValue, clickPt)) return;
-
-      activeDigitiser.setStore((prev: DigStore) => {
-        const existing = prev[digValue] ?? [];
-        return { ...prev, [digValue]: [...existing, clickPt] };
-      });
-    },
-    [digEnabled, activeDigitiser, digValue, digMode]
-  );
+  const activePhLines = PH_LINES;
+  const activeSlopeCurves = SLOPE_CURVES;
+  const activeWindCurves = WIND_CURVES;
 
   /** ===== Step 1: PH solve ===== */
   const tempX = tempToX(effective.shadeTempC);
@@ -1182,10 +964,6 @@ export default function Figure4Page() {
   const yAfterSlope = slopeFollow?.y ?? phHitPt.y;
   const toWindRefAfterSlope: Pt = { x: refs.windRefX, y: yAfterSlope };
 
-  const slopeMissing =
-    (effective.slopePercent < 0 && preparedSlopeNeg.length < 2) ||
-    (effective.slopePercent > 0 && preparedSlopePos.length < 2);
-
   const slopeTracePts: Pt[] = slopeFollow
     ? [...slopeFollow.pts, toWindRefAfterSlope]
     : [
@@ -1225,10 +1003,6 @@ export default function Figure4Page() {
 
   const yAfterWind = windFollow?.y ?? yAfterSlope;
 
-  const windMissing =
-    (effective.windComponentKt < 0 && preparedWindNeg.length < 2) ||
-    (effective.windComponentKt > 0 && preparedWindPos.length < 2);
-
   const windTracePts: Pt[] = windFollow
     ? windFollow.pts
     : [{ x: windToX(0), y: yAfterSlope }, { x: windToX(effective.windComponentKt), y: yAfterSlope }];
@@ -1238,15 +1012,6 @@ export default function Figure4Page() {
   const toDistanceAxisPt: Pt = { x: distanceAxisX, y: yAfterWind };
   const windToDistanceTracePts: Pt[] = [...windTracePts, toDistanceAxisPt];
   const approxDistanceM = yToDistanceM(yAfterWind);
-
-  /** ===== Digitiser UI options ===== */
-  const modeOptions: { label: string; value: DigMode }[] = [
-    { label: "PH lines", value: "PH" },
-    { label: "Slope panel lines (14 ids)", value: "SLOPE" },
-    { label: "Wind panel lines (12 ids)", value: "WIND" },
-  ];
-
-  const lineOptions = digMode === "PH" ? [...DIG_IDS.PH] : digMode === "SLOPE" ? [...DIG_IDS.SLOPE] : [...DIG_IDS.WIND];
 
   return (
     <main className="min-h-screen bg-slate-50">
@@ -1302,199 +1067,12 @@ export default function Figure4Page() {
               />
             </div>
 
-            {(slopeMissing || windMissing) && (
-              <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-[11px] text-amber-800">
-                <div className="font-semibold">Digitiser data missing for this sign</div>
-                <ul className="mt-1 list-disc pl-4">
-                  {slopeMissing && (
-                    <li>
-                      Slope: you entered {effective.slopePercent}% but you haven’t digitised enough{" "}
-                      {effective.slopePercent < 0 ? "DOWN (-7..-1)" : "UP (1..7)"} curves yet.
-                    </li>
-                  )}
-                  {windMissing && (
-                    <li>
-                      Wind: you entered {effective.windComponentKt} kt but you haven’t digitised enough{" "}
-                      {effective.windComponentKt < 0 ? "TAIL (-6..-1)" : "HEAD (1..6)"} curves yet.
-                    </li>
-                  )}
-                </ul>
-              </div>
-            )}
-
-            {/* Digitiser controls */}
-            <div className="mt-6 rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className="text-xs font-semibold text-slate-900">Digitiser</div>
-                  <div className="text-[11px] text-slate-600">
-                    Enable → pick mode + id → click along the curve inside that panel.
-                    <br />
-                    Slope ids: DOWN <span className="font-semibold">-7..-1</span> (left of ref line), UP{" "}
-                    <span className="font-semibold">1..7</span> (right of ref line). Wind ids: TAIL{" "}
-                    <span className="font-semibold">-6..-1</span>, HEAD <span className="font-semibold">1..6</span>.
-                    <br />
-                    Points are saved in your browser. Copy the export snippet when done.
-                  </div>
-                </div>
-                <button
-                  className={`h-9 rounded-xl px-3 text-xs font-semibold ring-1 ${
-                    digEnabled
-                      ? "bg-emerald-600 text-white ring-emerald-700"
-                      : "bg-white text-slate-800 ring-slate-300"
-                  }`}
-                  onClick={() => setDigEnabled((v) => !v)}
-                  type="button"
-                >
-                  {digEnabled ? "Digitiser: ON" : "Digitiser: OFF"}
-                </button>
-              </div>
-
-              <div className="mt-3 grid gap-3">
-                <div className="flex items-center gap-3">
-                  <label className="text-[11px] font-semibold text-slate-700">Mode</label>
-                  <select
-                    className="h-9 rounded-xl border border-slate-200 bg-white px-3 text-xs"
-                    value={digMode}
-                    onChange={(e) => {
-                      const m = e.target.value as DigMode;
-                      setDigMode(m);
-                      setDigValue(m === "PH" ? 4000 : 1);
-                    }}
-                    disabled={!digEnabled}
-                  >
-                    {modeOptions.map((m) => (
-                      <option key={m.value} value={m.value}>
-                        {m.label}
-                      </option>
-                    ))}
-                  </select>
-
-                  <label className="ml-2 text-[11px] font-semibold text-slate-700">
-                    {digMode === "PH" ? "Line (ft)" : "Curve id"}
-                  </label>
-                  <select
-                    className="h-9 rounded-xl border border-slate-200 bg-white px-3 text-xs"
-                    value={digValue}
-                    onChange={(e) => setDigValue(Number(e.target.value))}
-                    disabled={!digEnabled}
-                  >
-                    {lineOptions.map((v) => (
-                      <option key={v} value={v}>
-                        {v}
-                      </option>
-                    ))}
-                  </select>
-
-                  <div className="text-[11px] text-slate-700">
-                    Points: <span className="font-semibold">{digPointsCount}</span>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-3">
-                  <button
-                    className="h-9 rounded-xl bg-white px-3 text-xs font-semibold ring-1 ring-slate-300 disabled:opacity-50"
-                    disabled={!digEnabled || !digPointsCount}
-                    onClick={() =>
-                      activeDigitiser.setStore((prev: DigStore) => {
-                        const pts = prev[digValue] ?? [];
-                        return { ...prev, [digValue]: pts.slice(0, -1) };
-                      })
-                    }
-                    type="button"
-                  >
-                    Undo
-                  </button>
-
-                  <button
-                    className="h-9 rounded-xl bg-white px-3 text-xs font-semibold ring-1 ring-slate-300 disabled:opacity-50"
-                    disabled={!digEnabled || !digPointsCount}
-                    onClick={() =>
-                      activeDigitiser.setStore((prev: DigStore) => {
-                        const copy = { ...prev };
-                        delete copy[digValue];
-                        return copy;
-                      })
-                    }
-                    type="button"
-                  >
-                    Clear id
-                  </button>
-
-                  <button
-                    className="h-9 rounded-xl bg-white px-3 text-xs font-semibold ring-1 ring-slate-300 disabled:opacity-50"
-                    disabled={!canCopySnippet}
-                    onClick={() => {
-                      try {
-                        void navigator.clipboard?.writeText(exportSnippet);
-                      } catch {
-                        // ignore
-                      }
-                    }}
-                    type="button"
-                  >
-                    Copy snippet
-                  </button>
-
-                  <button
-                    className="h-9 rounded-xl bg-white px-3 text-xs font-semibold ring-1 ring-slate-300 disabled:opacity-50"
-                    disabled={!hasAnyDigData}
-                    onClick={() => {
-                      try {
-                        void navigator.clipboard?.writeText(exportAllSnippet);
-                      } catch {
-                        // ignore
-                      }
-                    }}
-                    type="button"
-                  >
-                    Copy all curves
-                  </button>
-
-                  <button
-                    className="h-9 rounded-xl bg-white px-3 text-xs font-semibold ring-1 ring-slate-300 disabled:opacity-50"
-                    disabled={!hasAnyDigData}
-                    onClick={() => {
-                      setDigPhStore({});
-                      setDigSlopeStore({});
-                      setDigWindStore({});
-                      try {
-                        window.localStorage.removeItem(DIG_STORAGE_KEY);
-                      } catch {
-                        // ignore
-                      }
-                    }}
-                    type="button"
-                  >
-                    Clear all
-                  </button>
-                </div>
-              </div>
-
-              {canCopySnippet && (
-                <textarea
-                  className="mt-3 h-36 w-full resize-none rounded-xl border border-slate-200 bg-white p-2 text-[11px] text-slate-900"
-                  value={exportSnippet}
-                  readOnly
-                />
-              )}
-
-              {hasAnyDigData && (
-                <textarea
-                  className="mt-3 h-44 w-full resize-none rounded-xl border border-slate-200 bg-white p-2 text-[11px] text-slate-900"
-                  value={exportAllSnippet}
-                  readOnly
-                />
-              )}
-            </div>
           </section>
 
           {/* Chart */}
           <section className="rounded-2xl bg-white shadow-sm ring-1 ring-slate-200 overflow-hidden">
             <div className="relative w-full aspect-[1024/723] bg-white">
               <svg
-                ref={svgRef}
-                onClick={onSvgClick}
                 className="absolute inset-0 w-full h-full"
                 viewBox={`0 0 ${VIEWBOX_W} ${VIEWBOX_H}`}
                 preserveAspectRatio="xMidYMid meet"
@@ -1608,24 +1186,6 @@ export default function Figure4Page() {
                   markerEnd="url(#arrowRed)"
                   pointerEvents="none"
                 />
-
-                {/* Digitiser points */}
-                {digDisplayPoints.map(({ id, pt }, i) => {
-                  const isActiveId = id === digValue;
-                  return (
-                    <circle
-                      key={`${id}-${i}`}
-                      cx={pt.x}
-                      cy={pt.y}
-                      r={isActiveId ? 4.5 : 3}
-                      fill={digPointColor(id)}
-                      opacity={isActiveId ? 0.95 : 0.45}
-                      stroke="#ffffff"
-                      strokeWidth={isActiveId ? 1 : 0.5}
-                      pointerEvents="none"
-                    />
-                  );
-                })}
 
                 {/* Right-axis read-off tick + landing distance label */}
                 <g pointerEvents="none">
