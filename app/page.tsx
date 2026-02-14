@@ -6,12 +6,14 @@ export default function AppHome() {
         App workspace (paywall later). Start with Figure 3.
       </p>
 
-      <a
-        className="mt-4 inline-block underline text-blue-600"
-        href="/figure/3"
-      >
-        Go to Figure 3
-      </a>
+      <div className="mt-4 flex flex-col gap-2">
+        <a className="underline text-blue-600" href="/figure/3">
+          Go to Figure 3
+        </a>
+        <a className="underline text-blue-600" href="/figure/4">
+          Go to Figure 4
+        </a>
+      </div>
     </main>
   );
 }
